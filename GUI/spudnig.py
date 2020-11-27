@@ -41,7 +41,7 @@ class SettingsGUI:
         self.master = master
         self.open = True # indicates if the settings screen is open
         self.master.title("Settings")
-        master.iconbitmap('spudnig.ico')
+        master.iconbitmap('./GUI/spudnig.ico')
         self.completed = False
         self.cancelled = False
 
@@ -141,7 +141,7 @@ class GUI:
         self.master.title("SPUDNIG")
         self.readyForAnalysis = False
         self.workdir = os.getcwd()
-        master.iconbitmap('spudnig.ico')
+        master.iconbitmap('./GUI/spudnig.ico')
         
         if cpu:
             self.openpose = self.workdir + "\openpose_cpu/bin/OpenPoseDemo.exe" 
@@ -197,7 +197,7 @@ class GUI:
             else:
                 if not self.savefile.endswith(".csv"):
                     self.savefile += ".csv"
-                self.data.to_csv(self.savefile,header=False)
+                self.data.to_csv(self.savefile)
                 self.saved = True
                 # TODO: delete files
                 subprocess.run('RMDIR /Q/S ' + self.outputfoler, shell=True)
@@ -345,11 +345,13 @@ class GUI:
         self.barLabel.pack(side=tk.TOP)
         self.progress.pack(side=tk.TOP)
         
+        print(self.filename)
         self.base = os.path.basename(self.filename)
         self.outputfoler = os.path.splitext(self.base)[0]
         updateBarThread = threading.Thread(target=self.updateBar)
         updateBarThread.start()
         threads.append(updateBarThread)
+
         subprocess.run(['mkdir', self.tempDir + r"/" + self.outputfoler], shell=True)
         if cpu:
             try:
@@ -368,6 +370,7 @@ class GUI:
         self.progress['value'] = 75
         sort_openpose_output.sort_openpose(self.tempDir + "\\" + self.outputfoler)
         self.progress['value'] = 85
+
         self.data = movements.main(self.tempDir + "\\" + self.outputfoler, self.fps, threshold, left, right)
 
         

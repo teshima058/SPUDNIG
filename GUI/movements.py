@@ -5,9 +5,10 @@ Created on Tue Jun  4 17:20:50 2019
 @author: jorrip
 """
 
+import math
 import pandas as pd
 import matplotlib.pyplot as plt
-import numpy
+import numpy as np
 from operator import itemgetter
 
 # The data for the pose, right- and left-hand need to be stored in csv's 
@@ -28,11 +29,10 @@ def merge_gestures(l1,l2):
     return l3
 
 
-def rest(i,data,keypoint):
+def rest(i,data,keypoint,span=14,span_ratio=0.7,moving_thresh=0.1):
     '''Determines whether current point is in rest position'''
     x = data.loc[i][keypoint]
     y = data.loc[i][keypoint+1]
-    span = 14
     
     start = int(i - span/2)
     if start < 0: 
@@ -43,10 +43,10 @@ def rest(i,data,keypoint):
         
     certainty = 0
     for j in range(start,end):
-        if abs(data.loc[j][keypoint] - x) < 10 and abs(data.loc[j][keypoint+1] - y) < 10:
+        if abs(data.loc[j][keypoint] - x) < moving_thresh and abs(data.loc[j][keypoint+1] - y) < moving_thresh:
             certainty += 1
             
-    if certainty/span >= 0.7:
+    if certainty/span >= span_ratio:
         return True
     else: 
         return False
@@ -71,10 +71,77 @@ def frameToTime(i,fps):
     
     return "{0:.0f}:{1:.0f}:{2:.0f}.{3:0>3d}".format(hours,minutes,seconds,milliseconds)
         
+def relocalize(data):
+    ''' Relocalize neck position to (0, 0) '''
+    localized_skeleton = []
+    conf_rate = []
+    data = np.array(data)
+    for frame in data:
+        offset_x = frame[3]
+        offset_y = frame[4]
+        frame_joints = []
+        for i,joint in enumerate(frame):
+            if i % 3 == 0:
+                frame_joints.append(joint - offset_x)
+            elif i % 3 == 1:
+                frame_joints.append(joint - offset_y)
+            else:
+                frame_joints.append(joint)
+        localized_skeleton.append(frame_joints)
+    return np.array(localized_skeleton)
 
-    
-def get_gestures(data,keypoint,threshold=0.3):
+def normalize(data):
+    ''' Normalize shoulder length to 1 '''
+    def get_distance(x1, y1, x2, y2):
+        return math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+
+    # Based on the most forward-facing frame
+    min_neck_angle = 1000
+    for i,pose in enumerate(data):
+        if abs(pose[0]) < min_neck_angle and pose[0] != 0:
+            min_neck_angle = abs(pose[0])
+            min_frame = i
+    forward_pose = data[min_frame]
+    shoulder_len = get_distance(forward_pose[1*3], forward_pose[1*3+1], forward_pose[2*3], forward_pose[2*3+1])
+
+    new_poses = []
+    for pose in data:
+        new_pose = []
+        for i,p in enumerate(pose):
+            if i % 3 != 2:
+                new_pose.append(p / shoulder_len)
+            else:
+                new_pose.append(p)
+        new_poses.append(new_pose)
+    return np.array(new_poses)
+
+def calcDistance(skeletons, mean_pose):
+    skeletons = np.reshape(skeletons, (-1, 25, 3))
+    mean_pose = np.reshape(mean_pose, (25, 3))
+    skeletons = np.delete(skeletons, 2, axis=2)
+    mean_pose = np.delete(mean_pose, 2, axis=1)
+    # calculate distance from mean pose
+    l_hand, r_hand = [], []
+    for s in skeletons:
+        l_hand.append(np.linalg.norm(s[4] - mean_pose[4]))
+        r_hand.append(np.linalg.norm(s[7] - mean_pose[7]))
+    return np.array([l_hand, r_hand])
+
+def get_gestures(data,keypoint,threshold=0.3,dist=None):
     '''Recognizes gestures that occur in data based on keypoint 'keypoint' and stores outcomes in gestures.'''
+
+    data = pd.DataFrame(data)
+
+    # Parameters
+    dist_thresh = 0.8               # Threshhold for distance from mean pose                    
+    span = 14                       # Number of frames before and after for checking
+    span_ratio = 0.7                # Percentage of frames for No-moving
+    moving_thresh1 = 0.20           # Threshold for if it is moving
+    moving_thresh2 = 0.10           # Threshold for if it is moving
+    moving_frame_num = 5            # Number of subsequent frames to check if it is moving
+    moving_frame_num_thresh = 3     # Threshhold for number of subsequent frames to check if it is moving
+    check_moving_frame = 100         # Number of subsequent frames to check for new rest frame
+
     local_gestures = [0]
     rest_x = 0
     rest_y = 0
@@ -96,28 +163,34 @@ def get_gestures(data,keypoint,threshold=0.3):
             local_gestures.append(gesture)
         
         else:
+            if dist is not None:
+                if dist[0][i] > dist_thresh or  dist[1][i] > dist_thresh:
+                    gesture = 1
+                    local_gestures.append(gesture)
+                    continue
+
             # update rest position
-            if rest(i,data,keypoint):
+            if rest(i,data,keypoint,span=span,span_ratio=span_ratio,moving_thresh=moving_thresh1):
                 rest_x = current[keypoint]
                 rest_y = current[keypoint+1]
                 gesture = 0
 
             # if hand coordinates are different from previous frame
-            elif abs(current[keypoint] - rest_x) > 5 or abs(current[keypoint+1] - rest_y) > 5:
+            elif abs(current[keypoint] - rest_x) > moving_thresh2 or abs(current[keypoint+1] - rest_y) > moving_thresh2:
                 # check if it's actual movement or just a few frames
                 certainty = 0
-                for x in range(i+1,min(i+6,data.shape[0])):
-                    if abs(data.loc[x][keypoint] - rest_x) > 5 or abs(data.loc[x][keypoint+1] - rest_y) > 5:
+                for x in range(i+1,min(i+moving_frame_num+1,data.shape[0])):
+                    if abs(data.loc[x][keypoint] - rest_x) > moving_thresh2 or abs(data.loc[x][keypoint+1] - rest_y) > moving_thresh2:
                         certainty += 1
                 # if there is no movement
-                if certainty/5 < 0.5:
+                if certainty < moving_frame_num_thresh:
                     gesture = 0
                 # if there is indeed movement
                 else:
                     # TODO: check whether hands return to rest position in future: if so, there is a gesture from current i until it reaches rest point again
-                    for t in range(i+1, min(i+300,data.shape[0])):
+                    for t in range(i+1, min(i+check_moving_frame,data.shape[0])):
                         # if hand has returned to rest position in next 10 seconds
-                        if isStill(data,t,keypoint):
+                        if isStill(data,t,keypoint,span_ratio=span_ratio,moving_thresh=moving_thresh1):
                             gesture = 1
                             returned = True
                             backToRest = t
@@ -128,14 +201,14 @@ def get_gestures(data,keypoint,threshold=0.3):
 
                     # if hands did not return to previous rest position, check if they returned to new restposition
                     if not returned:
-                        for t in range(i+1, min(i+300,data.shape[0])):
-                            if rest(t,data,keypoint):
+                        for t in range(i+1, min(i+check_moving_frame,data.shape[0])):
+                            if rest(t,data,keypoint,span=span,span_ratio=span_ratio,moving_thresh=moving_thresh1):
                                 gesture = 1
                                 returned = True
                                 backToRest = t
                                 rest_x = data.loc[backToRest][keypoint]
                                 rest_y = data.loc[backToRest][keypoint+1]
-                                break;
+                                break
 
             if returned:
                 for k in range(i,backToRest+1):
@@ -186,14 +259,14 @@ def post_process(data):
     return newdata
 
 
-def isStill(data,idx,keypoint):
+def isStill(data,idx,keypoint,span_ratio,moving_thresh):
     '''Returns true if the current idx point is resting'''
     count = 0
     current = data.loc[idx]
     for x in range(min(idx+1,data.shape[0]), min(idx+21,data.shape[0])):
-        if abs(current[keypoint] - data.loc[x][keypoint]) < 8 and abs(current[keypoint+1] - data.loc[x][keypoint+1]) < 8:
+        if abs(current[keypoint] - data.loc[x][keypoint]) < moving_thresh and abs(current[keypoint+1] - data.loc[x][keypoint+1]) < moving_thresh:
             count += 1
-    if count/20 > 0.7:
+    if count/20 > span_ratio:
         return True
     else:
         return False
@@ -243,6 +316,14 @@ def main(root, fps, threshold, left, right):
     left_hand = pd.read_csv(root + "/" + r"hand_left_sample.csv", header=None)
     right_hand = pd.read_csv(root + "/" + r"hand_right_sample.csv", header=None)
     
+    # Relocalize and Normalize
+    pose = relocalize(pose)
+    pose = normalize(pose)
+
+    # calculate distance from mean pose
+    mean_pose = np.mean(pose, axis=0)
+    dist = calcDistance(pose, mean_pose)
+
     if left and not right:
         pose_left = get_gestures(pose,7, threshold)
         left1 = get_gestures(left_hand,8, threshold)
@@ -274,8 +355,8 @@ def main(root, fps, threshold, left, right):
         
     
     if left and right:
-        pose_right = get_gestures(pose,4, threshold)
-        pose_left = get_gestures(pose,7, threshold)
+        pose_right = get_gestures(pose,4, threshold, dist)
+        pose_left = get_gestures(pose,7, threshold, dist)
         
         right1 = get_gestures(right_hand,8, threshold)
         left2 = get_gestures(pose,6, threshold)
